@@ -1,8 +1,109 @@
 use std::collections::HashMap;
-use std::mem::replace;
 use std::rc::Rc;
 fn main() {
-    let data0 = "CD Title,CD ID,CD Label,Performer,Orchestra,Conductor,Time
+    for data in [DATA0, DATA1] {
+        let data: Vec<Vec<_>> = data
+            .split('\n')
+            .map(|s| s.split(',').map(|s| s.trim()).collect())
+            .collect();
+
+        let num_strings_estimate = data.len() * data[0].len();
+
+        // WAY more efficient hashing later
+        let mut str_to_id: HashMap<&str, usize> = HashMap::with_capacity(num_strings_estimate);
+
+        let (header, data) = data.split_at(1);
+        let header = &*header[0];
+
+        let cardinality = header.len();
+        let cardinality2 = (1 << cardinality) - 2;
+
+        let mut maps: Vec<(usize, Vec<Option<HashMap<Rc<Vec<usize>>, usize>>>)> = (0..cardinality2)
+            .skip(1)
+            .map(|mask| {
+                (
+                    mask,
+                    (0..cardinality)
+                        .map(|i| (mask & (1 << i) == 0).then_some(HashMap::new()))
+                        .collect(),
+                )
+            })
+            .collect();
+
+        for row_s in data {
+            let row: Vec<_> = row_s
+                .iter()
+                .map(|s| {
+                    if let Some(&i) = str_to_id.get(s) {
+                        i
+                    } else {
+                        let id = str_to_id.len();
+                        str_to_id.insert(s, id);
+                        id
+                    }
+                })
+                .collect();
+            for (i, v) in &mut maps {
+                let mask = *i;
+                let mut null_key = false;
+                let key: Rc<Vec<_>> = Rc::new(
+                    row.iter()
+                        .copied()
+                        .enumerate()
+                        .filter_map(|(i, rval)| {
+                            (mask & (1 << i) != 0).then(|| {
+                                null_key |= row_s[i].is_empty();
+                                rval
+                            })
+                        })
+                        .collect(),
+                );
+                for (i, mv) in v.iter_mut().enumerate() {
+                    if let Some(v) = mv {
+                        let val = row[i];
+                        let val_s = row_s[i];
+                        if !val_s.is_empty() && null_key {
+                            *mv = None;
+                        } else if let Some(old_val) = v.insert(Rc::clone(&key), val) {
+                            if val != old_val {
+                                *mv = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        maps.sort_by_key(|(i, _)| i.count_ones());
+        println!("\n{header:?}\n\ninferred dependencies:\n");
+        let mut reduced_keys: Vec<(usize, usize)> = Vec::new();
+        for (mask, v) in maps {
+            let mut key = v
+                .iter()
+                .enumerate()
+                .map(|(i, m)| usize::from(m.is_some()) << i)
+                .fold(0, std::ops::BitOr::bitor);
+            for (_, b) in reduced_keys.iter().filter(|(a, _)| (a & !mask) == 0) {
+                key &= !b;
+            }
+            if key != 0 {
+                reduced_keys.push((mask, key));
+                let mask_s: Vec<_> = (0..cardinality)
+                    .filter(|i| mask & (1 << i) != 0)
+                    .map(|i| header[i])
+                    .collect();
+                for s in (0..cardinality)
+                    .filter(|i| key & (1 << i) != 0)
+                    .map(|i| header[i])
+                {
+                    println!("{mask_s:?} -> {s}");
+                }
+            }
+        }
+        println!();
+    }
+}
+
+const DATA0: &str = "CD Title,CD ID,CD Label,Performer,Orchestra,Conductor,Time
 Brandenburg Concertos ##1-3,OQ0062,Concerto Classics,,Hamburg Symphony Orchestra,Gabor Otücs,
 Brandenburg Concertos ##4-6,OQ0063,Concerto Classics,,Hamburg Symphony Orchestra,Gabor Otücs,
 Christmas Oratoria,8.550428-430,Naxos,Various,Failoni Radio Orch./Hungarian Radio Choir,Géza Oberfrank,148.06
@@ -28,7 +129,7 @@ Die Kunst der Fugue,CDA66631/2,Hyperion,Tatiana Nikolaeva,,,122.15
 Sechs Suiten für Violincello solo,419 359-2,DG,Pierre Fournier,,,138.45
 Goldberg Variationen,WVH 032,Arts Music,Pieter Jan Belder,,,";
 
-    let data1 = "Composition Name,BWV Num,CD Label,CD ID,Instrument,key major/minor,key
+const DATA1: &str = "Composition Name,BWV Num,CD Label,CD ID,Instrument,key major/minor,key
 Invention C Major,BWV 772,Harmonia Mundi,1905161,Piano,C Major,C
 Invention C Minor,BWV 773,Harmonia Mundi,1905161,Piano,C Minor,C
 Invention D Major,BWV 774,Harmonia Mundi,1905161,Piano,D Major,D
@@ -213,167 +314,3 @@ Prelude & Fugue #22 Bb Minor,BWV 867,Sony,SMN 52600,Piano,Bb Minor,Bb
 Prelude & Fugue #23 B Major,BWV 868,Sony,SMN 52600,Piano,B Major,B
 Prelude & Fugue #24 B Minor,BWV 869,Sony,SMN 52600,Piano,B Minor,B
 Goldberg Variations,BWV 988,Arts Music,WVH 032,Harpsichord,,";
-
-    let data = data1;
-    let a: Vec<Vec<_>> = data
-        .split("\n")
-        .map(|s| s.split(",").map(|s| s.trim()).collect())
-        .collect();
-
-    let num_strings_estimate = a.len() * a[0].len();
-
-    // WAY more efficient hashing later
-    let mut str_to_id: HashMap<&str, usize> = HashMap::with_capacity(num_strings_estimate);
-
-    let (header, data) = a.split_at(1);
-    let header = &*header[0];
-
-    let cardinality = header.len();
-    let cardinality2 = 1 << cardinality - 2;
-
-    //  Vec<( = for each candidate key mask
-    //      usize, = candidate key mask
-    //      Vec< = map header num -> map
-    //          Option< = has no duplicates
-    //              HashMap< = map candidate key -> header
-    //                  Rc<
-    //                      Vec<
-    //                          usize
-    //                          >
-    //                      >,
-    //                  usize
-    //                  >
-    //              >
-    //          >
-    //      )>
-    let mut maps: Vec<(usize, Vec<Option<HashMap<Rc<Vec<usize>>, usize>>>)> = (0..cardinality2)
-        .skip(1)
-        .map(|mask| {
-            (
-                mask,
-                (0..cardinality)
-                    .map(|i| (mask & (1 << i) == 0).then_some(HashMap::new()))
-                    .collect(),
-            )
-        })
-        .collect();
-
-    //let mut maps: Vec<Vec<Option<HashMap<usize, usize>>>> = (0..cardinality)
-    //    .map(|_| (0..cardinality).map(|_| Some(HashMap::new())).collect())
-    //    .collect();
-    //for i in 0..cardinality {
-    //    maps[i][i] = None;
-    //}
-
-    // (
-    //   2**n
-    // )**2
-
-    for row_s in data {
-        let row: Vec<_> = row_s
-            .iter()
-            .map(|s| match str_to_id.get(s) {
-                None => {
-                    let id = str_to_id.len();
-                    str_to_id.insert(s, id);
-                    id
-                }
-                Some(&i) => i,
-            })
-            .collect();
-        for (i, v) in &mut maps {
-            let mask = *i;
-            let mut null_key = false;
-            let key: Rc<Vec<_>> = Rc::new(
-                row.iter()
-                    .copied()
-                    .enumerate()
-                    .filter_map(|(i, rval)| {
-                        if mask & (1 << i) != 0 {
-                            if row_s[i] == "" {
-                                null_key = true;
-                            }
-                            Some(rval)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            );
-            for (i, mv) in v.iter_mut().enumerate() {
-                if let Some(v) = mv {
-                    let val = row[i];
-                    let val_s = row_s[i];
-                    if val_s != "" && null_key {
-                        *mv = None
-                    } else if let Some(old_val) = v.insert(key.clone(), val) {
-                        if val != old_val {
-                            *mv = None;
-                        }
-                    }
-                }
-            }
-            //for j in 0..cardinality {
-            //    let (a, b) = (row[i], row[j]);
-            //    let (a_s, b_s) = (row_s[i], row_s[j]);
-            //    if a_s == "" {
-            //        if b_s != "" {
-            //            maps[i][j] = None
-            //        } else {
-            //            continue;
-            //        }
-            //    }
-            //    if let Some(map) = &mut maps[i][j] {
-            //        if let Some(old_b) = map.insert(a, b) {
-            //            if old_b != b {
-            //                maps[i][j] = None;
-            //                dbg!(((a, b, old_b), (header[i], header[j])));
-            //            }
-            //        }
-            //    }
-            //}
-        }
-    }
-    maps.sort_by_key(|(i, _)| i.count_ones());
-
-    // mask -> keys
-    let mut reduced_keys: Vec<(usize, usize)> = Vec::new();
-    for (mask, v) in maps {
-        let mut key = v
-            .iter()
-            .enumerate()
-            .map(|(i, m)| usize::from(m.is_some()) << i)
-            .fold(0, std::ops::BitOr::bitor);
-        for (_, b) in reduced_keys.iter().filter(|(a, _)| (a & !mask) == 0) {
-            key &= !b;
-        }
-        if key != 0 {
-            reduced_keys.push((mask, key));
-            let mask_s: Vec<_> = (0..cardinality)
-                .filter(|i| mask & (1 << i) != 0)
-                .map(|i| header[i])
-                .collect();
-            //for (_, s) in v.iter().zip(header).filter(|(m, _)| m.is_some()) {
-            for s in (0..cardinality)
-                .filter(|i| key & (1 << i) != 0)
-                .map(|i| header[i])
-            {
-                println!("{mask_s:?} -> {s}");
-            }
-        }
-    }
-
-    /*
-    println!("\nconnections:\n");
-    for i in 0..cardinality {
-        for j in 0..cardinality {
-            let forward = replace(&mut maps[i][j], None).is_some();
-            if forward {
-                let back = replace(&mut maps[j][i], None).is_some();
-                let (a, b) = (header[i], header[j]);
-                println!("({}) {} ({})", a, if back { "<=>" } else { " ->" }, b);
-            }
-        }
-    }
-    println!();*/
-}
